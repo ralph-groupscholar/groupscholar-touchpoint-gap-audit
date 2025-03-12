@@ -1,0 +1,13 @@
+scholar_id,contact_date,channel,program,status
+S-1001,2026-01-31,Email,Launchpad,Reached
+S-1001,2025-12-12,Call,Launchpad,No Answer
+S-1002,2025-11-18,SMS,Launchpad,Reached
+S-1003,2025-09-20,Email,Pioneer,Reached
+S-1003,2025-12-22,Email,Pioneer,Reached
+S-1004,2025-08-15,Call,Pioneer,Reached
+S-1005,2026-02-03,SMS,Bridge,Reached
+S-1006,2025-07-10,Email,Bridge,Reached
+S-1007,2025-12-01,Call,Launchpad,Reached
+S-1008,2026-01-05,Email,Bridge,Reached
+S-1009,2025-10-02,SMS,Pioneer,Reached
+S-1010,2025-06-14,Email,,Reached
