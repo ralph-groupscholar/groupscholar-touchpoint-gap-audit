@@ -8,6 +8,7 @@ Group Scholar Touchpoint Gap Audit is a local-first Go CLI that scans outreach l
 - Compute gap tiers (on track, due soon, overdue, critical).
 - Summarize program-level gap health and last-channel distribution.
 - Emit a JSON report for downstream dashboards.
+- Export alert-ready CSVs for overdue and critical follow-ups.
 
 ## Usage
 
@@ -19,6 +20,18 @@ Optional JSON output:
 
 ```bash
 go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --json out.json
+```
+
+Optional alert CSV output (overdue+ by default):
+
+```bash
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --alerts alerts.csv
+```
+
+Include due-soon alerts too:
+
+```bash
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --alerts alerts.csv --min-tier due_soon
 ```
 
 ## CSV Format

@@ -20,58 +20,59 @@ const (
 )
 
 type ScholarStats struct {
-	ScholarID   string
-	Program     string
-	LastChannel string
-	LastStatus  string
-	LastContact time.Time
+	ScholarID    string
+	Program      string
+	LastChannel  string
+	LastStatus   string
+	LastContact  time.Time
 	ContactCount int
 	FirstContact time.Time
-	Channels    map[string]int
+	Channels     map[string]int
 }
 
 type ScholarSummary struct {
-	ScholarID   string    `json:"scholar_id"`
-	Program     string    `json:"program"`
-	LastChannel string    `json:"last_channel"`
-	LastStatus  string    `json:"last_status"`
-	LastContact time.Time `json:"last_contact"`
-	ContactCount int      `json:"contact_count"`
-	GapDays     int       `json:"gap_days"`
-	Tier        string    `json:"tier"`
+	ScholarID    string    `json:"scholar_id"`
+	Program      string    `json:"program"`
+	LastChannel  string    `json:"last_channel"`
+	LastStatus   string    `json:"last_status"`
+	LastContact  time.Time `json:"last_contact"`
+	FirstContact time.Time `json:"first_contact"`
+	ContactCount int       `json:"contact_count"`
+	GapDays      int       `json:"gap_days"`
+	Tier         string    `json:"tier"`
 }
 
 type ProgramSummary struct {
-	Program        string `json:"program"`
-	Scholars       int    `json:"scholars"`
-	AvgGapDays     float64 `json:"avg_gap_days"`
-	OverdueCount   int    `json:"overdue_count"`
-	CriticalCount  int    `json:"critical_count"`
-	OnTrackCount   int    `json:"on_track_count"`
-	DueSoonCount   int    `json:"due_soon_count"`
+	Program       string  `json:"program"`
+	Scholars      int     `json:"scholars"`
+	AvgGapDays    float64 `json:"avg_gap_days"`
+	OverdueCount  int     `json:"overdue_count"`
+	CriticalCount int     `json:"critical_count"`
+	OnTrackCount  int     `json:"on_track_count"`
+	DueSoonCount  int     `json:"due_soon_count"`
 }
 
 type ReportSummary struct {
-	AsOf           string  `json:"as_of"`
-	CadenceDays    int     `json:"cadence_days"`
-	DueWindowDays  int     `json:"due_window_days"`
-	TotalScholars  int     `json:"total_scholars"`
-	AvgGapDays     float64 `json:"avg_gap_days"`
-	MedianGapDays  float64 `json:"median_gap_days"`
-	MaxGapDays     int     `json:"max_gap_days"`
-	OnTrackCount   int     `json:"on_track_count"`
-	DueSoonCount   int     `json:"due_soon_count"`
-	OverdueCount   int     `json:"overdue_count"`
-	CriticalCount  int     `json:"critical_count"`
-	InvalidRows    int     `json:"invalid_rows"`
+	AsOf          string  `json:"as_of"`
+	CadenceDays   int     `json:"cadence_days"`
+	DueWindowDays int     `json:"due_window_days"`
+	TotalScholars int     `json:"total_scholars"`
+	AvgGapDays    float64 `json:"avg_gap_days"`
+	MedianGapDays float64 `json:"median_gap_days"`
+	MaxGapDays    int     `json:"max_gap_days"`
+	OnTrackCount  int     `json:"on_track_count"`
+	DueSoonCount  int     `json:"due_soon_count"`
+	OverdueCount  int     `json:"overdue_count"`
+	CriticalCount int     `json:"critical_count"`
+	InvalidRows   int     `json:"invalid_rows"`
 }
 
 type Report struct {
-	Summary         ReportSummary    `json:"summary"`
-	ProgramSummary  []ProgramSummary `json:"program_summary"`
-	ChannelSummary  map[string]int   `json:"last_channel_summary"`
-	TopGaps         []ScholarSummary `json:"top_gaps"`
-	Scholars        []ScholarSummary `json:"scholars"`
+	Summary        ReportSummary    `json:"summary"`
+	ProgramSummary []ProgramSummary `json:"program_summary"`
+	ChannelSummary map[string]int   `json:"last_channel_summary"`
+	TopGaps        []ScholarSummary `json:"top_gaps"`
+	Scholars       []ScholarSummary `json:"scholars"`
 }
 
 func main() {
@@ -81,6 +82,8 @@ func main() {
 	dueWindow := flag.Int("due-window", 0, "Days after cadence before overdue; default cadence/2")
 	topN := flag.Int("top", defaultTopN, "Top N largest gaps to show")
 	jsonOut := flag.String("json", "", "Optional JSON output path")
+	alertsOut := flag.String("alerts", "", "Optional CSV output for alert tiers")
+	minTier := flag.String("min-tier", "overdue", "Minimum tier for alerts (due_soon, overdue, critical)")
 	flag.Parse()
 
 	if *inputPath == "" {
@@ -117,6 +120,13 @@ func main() {
 			exitWithError(err)
 		}
 		fmt.Printf("\nJSON report saved to %s\n", *jsonOut)
+	}
+
+	if *alertsOut != "" {
+		if err := writeAlertsCSV(report, *alertsOut, *minTier); err != nil {
+			exitWithError(err)
+		}
+		fmt.Printf("Alert CSV saved to %s\n", *alertsOut)
 	}
 }
 
@@ -226,14 +236,15 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 		gap := gapDays(asOf, scholar.LastContact)
 		tier := gapTier(gap, cadenceDays, dueWindowDays)
 		summary := ScholarSummary{
-			ScholarID: scholar.ScholarID,
-			Program: scholar.Program,
-			LastChannel: scholar.LastChannel,
-			LastStatus: scholar.LastStatus,
-			LastContact: scholar.LastContact,
+			ScholarID:    scholar.ScholarID,
+			Program:      scholar.Program,
+			LastChannel:  scholar.LastChannel,
+			LastStatus:   scholar.LastStatus,
+			LastContact:  scholar.LastContact,
+			FirstContact: scholar.FirstContact,
 			ContactCount: scholar.ContactCount,
-			GapDays: gap,
-			Tier: tier,
+			GapDays:      gap,
+			Tier:         tier,
 		}
 		summaries = append(summaries, summary)
 		gapValues = append(gapValues, gap)
@@ -269,23 +280,23 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 
 	report := Report{
 		Summary: ReportSummary{
-			AsOf: asOf.Format("2006-01-02"),
-			CadenceDays: cadenceDays,
+			AsOf:          asOf.Format("2006-01-02"),
+			CadenceDays:   cadenceDays,
 			DueWindowDays: dueWindowDays,
 			TotalScholars: len(summaries),
-			AvgGapDays: avgGap,
+			AvgGapDays:    avgGap,
 			MedianGapDays: medianGap,
-			MaxGapDays: maxGap,
-			OnTrackCount: onTrack,
-			DueSoonCount: dueSoon,
-			OverdueCount: overdue,
+			MaxGapDays:    maxGap,
+			OnTrackCount:  onTrack,
+			DueSoonCount:  dueSoon,
+			OverdueCount:  overdue,
 			CriticalCount: critical,
-			InvalidRows: invalidRows,
+			InvalidRows:   invalidRows,
 		},
 		ProgramSummary: programSummary,
 		ChannelSummary: channelSummary,
-		TopGaps: topGaps,
-		Scholars: summaries,
+		TopGaps:        topGaps,
+		Scholars:       summaries,
 	}
 
 	return report, nil
@@ -461,6 +472,57 @@ func writeJSON(report Report, path string) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+func writeAlertsCSV(report Report, path string, minTier string) error {
+	threshold, ok := tierRank(minTier)
+	if !ok {
+		return fmt.Errorf("invalid --min-tier value: %s", minTier)
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"scholar_id",
+		"program",
+		"last_contact",
+		"first_contact",
+		"gap_days",
+		"tier",
+		"last_channel",
+		"last_status",
+		"contact_count",
+	}); err != nil {
+		return err
+	}
+
+	for _, entry := range report.Scholars {
+		rank, _ := tierRank(entry.Tier)
+		if rank < threshold {
+			continue
+		}
+		record := []string{
+			entry.ScholarID,
+			entry.Program,
+			formatDate(entry.LastContact),
+			formatDate(entry.FirstContact),
+			fmt.Sprintf("%d", entry.GapDays),
+			entry.Tier,
+			entry.LastChannel,
+			entry.LastStatus,
+			fmt.Sprintf("%d", entry.ContactCount),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
 func parseDate(value string) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -481,6 +543,28 @@ func parseDate(value string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unsupported date format: %s", value)
+}
+
+func tierRank(value string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "due_soon":
+		return 1, true
+	case "overdue":
+		return 2, true
+	case "critical":
+		return 3, true
+	case "on_track":
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func formatDate(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format("2006-01-02")
 }
 
 func normalizeHeaders(headers []string) map[string]int {
