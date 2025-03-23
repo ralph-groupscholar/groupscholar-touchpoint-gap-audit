@@ -34,6 +34,17 @@ Include due-soon alerts too:
 go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --alerts alerts.csv --min-tier due_soon
 ```
 
+## Database storage
+
+Store audit runs in Postgres for longitudinal tracking.
+
+```bash
+export TOUCHPOINT_GAP_AUDIT_DB_URL="postgres://user:pass@host:port/dbname"
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --db --db-tag "weekly-touchpoints"
+```
+
+Tables are created in the `touchpoint_gap_audit` schema by default. Override with `--db-schema`.
+
 ## CSV Format
 
 Required columns:

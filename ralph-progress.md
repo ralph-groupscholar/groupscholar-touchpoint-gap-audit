@@ -5,6 +5,11 @@
 - Implemented CSV parsing, gap tiering, program/channel rollups, and optional JSON exports.
 - Added sample data and a README with usage guidance.
 
+## Iteration 34
+- Added optional Postgres persistence for audit runs, including schema/table creation and run tagging.
+- Fixed EOF handling and refreshed the README with database usage guidance.
+- Seeded the production database with a sample audit run (run_id: 4b2b53f6-a2d1-46bf-961f-7ee270a502f4).
+
 ## Iteration 44 (continued)
 - Added alert CSV export with configurable minimum tier for follow-up lists.
 - Included first-contact dates in summaries and exports for context.

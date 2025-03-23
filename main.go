@@ -1,17 +1,24 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const (
@@ -75,6 +82,12 @@ type Report struct {
 	Scholars       []ScholarSummary `json:"scholars"`
 }
 
+type DBConfig struct {
+	URL    string
+	Schema string
+	Tag    string
+}
+
 func main() {
 	inputPath := flag.String("input", "", "Path to outreach CSV")
 	cadenceDays := flag.Int("cadence", defaultCadenceDays, "Expected cadence in days")
@@ -84,6 +97,9 @@ func main() {
 	jsonOut := flag.String("json", "", "Optional JSON output path")
 	alertsOut := flag.String("alerts", "", "Optional CSV output for alert tiers")
 	minTier := flag.String("min-tier", "overdue", "Minimum tier for alerts (due_soon, overdue, critical)")
+	dbEnabled := flag.Bool("db", false, "Store report in Postgres (requires TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL)")
+	dbSchema := flag.String("db-schema", "touchpoint_gap_audit", "Postgres schema for audit tables")
+	dbTag := flag.String("db-tag", "", "Optional label for this audit run")
 	flag.Parse()
 
 	if *inputPath == "" {
@@ -128,6 +144,22 @@ func main() {
 		}
 		fmt.Printf("Alert CSV saved to %s\n", *alertsOut)
 	}
+
+	if *dbEnabled {
+		dbURL := dbURLFromEnv()
+		if dbURL == "" {
+			exitWithError(errors.New("database URL missing; set TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL"))
+		}
+		runID, err := storeReportInDB(report, DBConfig{
+			URL:    dbURL,
+			Schema: *dbSchema,
+			Tag:    *dbTag,
+		})
+		if err != nil {
+			exitWithError(err)
+		}
+		fmt.Printf("\nStored audit run in Postgres (run_id=%s)\n", runID)
+	}
 }
 
 func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int, topN int) (Report, error) {
@@ -165,7 +197,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 	for {
 		record, err := reader.Read()
 		if err != nil {
-			if errors.Is(err, os.EOF) {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			return Report{}, fmt.Errorf("unable to read CSV: %w", err)
@@ -470,6 +502,196 @@ func writeJSON(report Report, path string) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0644)
+}
+
+func dbURLFromEnv() string {
+	if value := strings.TrimSpace(os.Getenv("TOUCHPOINT_GAP_AUDIT_DB_URL")); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv("DATABASE_URL"))
+}
+
+func sanitizeSchema(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("db schema is required")
+	}
+	valid := regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	if !valid.MatchString(value) {
+		return "", fmt.Errorf("invalid schema name: %s", value)
+	}
+	return value, nil
+}
+
+func storeReportInDB(report Report, cfg DBConfig) (string, error) {
+	schema, err := sanitizeSchema(cfg.Schema)
+	if err != nil {
+		return "", err
+	}
+
+	db, err := sql.Open("pgx", cfg.URL)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		return "", err
+	}
+
+	if err := ensureSchema(ctx, db, schema); err != nil {
+		return "", err
+	}
+
+	runID := uuid.New()
+	asOfDate, err := parseDate(report.Summary.AsOf)
+	if err != nil {
+		return "", err
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO %s.audit_runs (
+			id, as_of, cadence_days, due_window_days, total_scholars,
+			avg_gap_days, median_gap_days, max_gap_days, on_track_count,
+			due_soon_count, overdue_count, critical_count, invalid_rows, run_tag
+		) VALUES (
+			$1,$2,$3,$4,$5,
+			$6,$7,$8,$9,
+			$10,$11,$12,$13,$14
+		)`, schema),
+		runID,
+		dateOnly(asOfDate),
+		report.Summary.CadenceDays,
+		report.Summary.DueWindowDays,
+		report.Summary.TotalScholars,
+		report.Summary.AvgGapDays,
+		report.Summary.MedianGapDays,
+		report.Summary.MaxGapDays,
+		report.Summary.OnTrackCount,
+		report.Summary.DueSoonCount,
+		report.Summary.OverdueCount,
+		report.Summary.CriticalCount,
+		report.Summary.InvalidRows,
+		nullString(cfg.Tag),
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return "", err
+	}
+
+	insertScholarSQL := fmt.Sprintf(`
+		INSERT INTO %s.audit_scholar_gaps (
+			id, run_id, scholar_id, program, last_channel, last_status,
+			last_contact, contact_count, gap_days, tier
+		) VALUES (
+			$1,$2,$3,$4,$5,$6,
+			$7,$8,$9,$10
+		)`, schema)
+
+	for _, entry := range report.Scholars {
+		lastContact := nullDate(entry.LastContact)
+		_, err = tx.ExecContext(ctx, insertScholarSQL,
+			uuid.New(),
+			runID,
+			entry.ScholarID,
+			nullString(entry.Program),
+			nullString(entry.LastChannel),
+			nullString(entry.LastStatus),
+			lastContact,
+			entry.ContactCount,
+			entry.GapDays,
+			entry.Tier,
+		)
+		if err != nil {
+			_ = tx.Rollback()
+			return "", err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return runID.String(), nil
+}
+
+func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, schema)); err != nil {
+		return err
+	}
+
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.audit_runs (
+			id uuid PRIMARY KEY,
+			as_of date NOT NULL,
+			cadence_days integer NOT NULL,
+			due_window_days integer NOT NULL,
+			total_scholars integer NOT NULL,
+			avg_gap_days numeric(8,2) NOT NULL,
+			median_gap_days numeric(8,2) NOT NULL,
+			max_gap_days integer NOT NULL,
+			on_track_count integer NOT NULL,
+			due_soon_count integer NOT NULL,
+			overdue_count integer NOT NULL,
+			critical_count integer NOT NULL,
+			invalid_rows integer NOT NULL,
+			run_tag text,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`, schema))
+	if err != nil {
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.audit_scholar_gaps (
+			id uuid PRIMARY KEY,
+			run_id uuid NOT NULL REFERENCES %s.audit_runs(id) ON DELETE CASCADE,
+			scholar_id text NOT NULL,
+			program text,
+			last_channel text,
+			last_status text,
+			last_contact date,
+			contact_count integer NOT NULL,
+			gap_days integer NOT NULL,
+			tier text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`, schema, schema))
+	if err != nil {
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_scholar_gaps_run_idx ON %s.audit_scholar_gaps (run_id)`, schema, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_scholar_gaps_tier_idx ON %s.audit_scholar_gaps (tier)`, schema, schema))
+	return err
+}
+
+func nullString(value string) sql.NullString {
+	if strings.TrimSpace(value) == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: value, Valid: true}
+}
+
+func nullDate(value time.Time) sql.NullTime {
+	if value.IsZero() {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: dateOnly(value), Valid: true}
 }
 
 func writeAlertsCSV(report Report, path string, minTier string) error {
