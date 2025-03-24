@@ -100,6 +100,7 @@ func main() {
 	dbEnabled := flag.Bool("db", false, "Store report in Postgres (requires TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL)")
 	dbSchema := flag.String("db-schema", "touchpoint_gap_audit", "Postgres schema for audit tables")
 	dbTag := flag.String("db-tag", "", "Optional label for this audit run")
+	initDB := flag.Bool("init-db", false, "Initialize database schema and seed data if empty")
 	flag.Parse()
 
 	if *inputPath == "" {
@@ -145,20 +146,38 @@ func main() {
 		fmt.Printf("Alert CSV saved to %s\n", *alertsOut)
 	}
 
-	if *dbEnabled {
+	if *dbEnabled || *initDB {
 		dbURL := dbURLFromEnv()
 		if dbURL == "" {
 			exitWithError(errors.New("database URL missing; set TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL"))
 		}
-		runID, err := storeReportInDB(report, DBConfig{
+		cfg := DBConfig{
 			URL:    dbURL,
 			Schema: *dbSchema,
 			Tag:    *dbTag,
-		})
-		if err != nil {
-			exitWithError(err)
 		}
-		fmt.Printf("\nStored audit run in Postgres (run_id=%s)\n", runID)
+		seeded := false
+		if *initDB {
+			runID, err := seedDatabase(report, cfg)
+			if err != nil {
+				exitWithError(err)
+			}
+			if runID != "" {
+				seeded = true
+				fmt.Printf("\nSeeded Postgres with initial audit run (run_id=%s)\n", runID)
+			}
+		}
+		if *dbEnabled {
+			if seeded {
+				fmt.Println("Skipped duplicate insert; current report already used for seed.")
+			} else {
+				runID, err := storeReportInDB(report, cfg)
+				if err != nil {
+					exitWithError(err)
+				}
+				fmt.Printf("\nStored audit run in Postgres (run_id=%s)\n", runID)
+			}
+		}
 	}
 }
 
@@ -523,6 +542,41 @@ func sanitizeSchema(value string) (string, error) {
 	return value, nil
 }
 
+func seedDatabase(report Report, cfg DBConfig) (string, error) {
+	schema, err := sanitizeSchema(cfg.Schema)
+	if err != nil {
+		return "", err
+	}
+
+	db, err := sql.Open("pgx", cfg.URL)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		return "", err
+	}
+
+	if err := ensureSchema(ctx, db, schema); err != nil {
+		return "", err
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s.audit_runs`, schema)).Scan(&count); err != nil {
+		return "", err
+	}
+	if count > 0 {
+		fmt.Println("Audit data already present; skipping seed.")
+		return "", nil
+	}
+
+	return storeReportTx(ctx, db, report, schema, cfg.Tag)
+}
+
 func storeReportInDB(report Report, cfg DBConfig) (string, error) {
 	schema, err := sanitizeSchema(cfg.Schema)
 	if err != nil {
@@ -546,6 +600,10 @@ func storeReportInDB(report Report, cfg DBConfig) (string, error) {
 		return "", err
 	}
 
+	return storeReportTx(ctx, db, report, schema, cfg.Tag)
+}
+
+func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string, tag string) (string, error) {
 	runID := uuid.New()
 	asOfDate, err := parseDate(report.Summary.AsOf)
 	if err != nil {
@@ -585,7 +643,7 @@ func storeReportInDB(report Report, cfg DBConfig) (string, error) {
 		report.Summary.OverdueCount,
 		report.Summary.CriticalCount,
 		report.Summary.InvalidRows,
-		nullString(cfg.Tag),
+		nullString(tag),
 	)
 	if err != nil {
 		_ = tx.Rollback()
@@ -595,14 +653,15 @@ func storeReportInDB(report Report, cfg DBConfig) (string, error) {
 	insertScholarSQL := fmt.Sprintf(`
 		INSERT INTO %s.audit_scholar_gaps (
 			id, run_id, scholar_id, program, last_channel, last_status,
-			last_contact, contact_count, gap_days, tier
+			last_contact, first_contact, contact_count, gap_days, tier
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,
-			$7,$8,$9,$10
+			$7,$8,$9,$10,$11
 		)`, schema)
 
 	for _, entry := range report.Scholars {
 		lastContact := nullDate(entry.LastContact)
+		firstContact := nullDate(entry.FirstContact)
 		_, err = tx.ExecContext(ctx, insertScholarSQL,
 			uuid.New(),
 			runID,
@@ -611,9 +670,57 @@ func storeReportInDB(report Report, cfg DBConfig) (string, error) {
 			nullString(entry.LastChannel),
 			nullString(entry.LastStatus),
 			lastContact,
+			firstContact,
 			entry.ContactCount,
 			entry.GapDays,
 			entry.Tier,
+		)
+		if err != nil {
+			_ = tx.Rollback()
+			return "", err
+		}
+	}
+
+	insertProgramSQL := fmt.Sprintf(`
+		INSERT INTO %s.audit_program_summary (
+			id, run_id, program, scholars, avg_gap_days, on_track_count,
+			due_soon_count, overdue_count, critical_count
+		) VALUES (
+			$1,$2,$3,$4,$5,$6,
+			$7,$8,$9
+		)`, schema)
+
+	for _, entry := range report.ProgramSummary {
+		_, err = tx.ExecContext(ctx, insertProgramSQL,
+			uuid.New(),
+			runID,
+			entry.Program,
+			entry.Scholars,
+			entry.AvgGapDays,
+			entry.OnTrackCount,
+			entry.DueSoonCount,
+			entry.OverdueCount,
+			entry.CriticalCount,
+		)
+		if err != nil {
+			_ = tx.Rollback()
+			return "", err
+		}
+	}
+
+	insertChannelSQL := fmt.Sprintf(`
+		INSERT INTO %s.audit_channel_summary (
+			id, run_id, channel, touchpoint_count
+		) VALUES (
+			$1,$2,$3,$4
+		)`, schema)
+
+	for channel, count := range report.ChannelSummary {
+		_, err = tx.ExecContext(ctx, insertChannelSQL,
+			uuid.New(),
+			runID,
+			channel,
+			count,
 		)
 		if err != nil {
 			_ = tx.Rollback()
@@ -663,9 +770,47 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 			last_channel text,
 			last_status text,
 			last_contact date,
+			first_contact date,
 			contact_count integer NOT NULL,
 			gap_days integer NOT NULL,
 			tier text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`, schema, schema))
+	if err != nil {
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		ALTER TABLE %s.audit_scholar_gaps
+		ADD COLUMN IF NOT EXISTS first_contact date
+	`, schema))
+	if err != nil {
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.audit_program_summary (
+			id uuid PRIMARY KEY,
+			run_id uuid NOT NULL REFERENCES %s.audit_runs(id) ON DELETE CASCADE,
+			program text NOT NULL,
+			scholars integer NOT NULL,
+			avg_gap_days numeric(8,2) NOT NULL,
+			on_track_count integer NOT NULL,
+			due_soon_count integer NOT NULL,
+			overdue_count integer NOT NULL,
+			critical_count integer NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`, schema, schema))
+	if err != nil {
+		return err
+	}
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.audit_channel_summary (
+			id uuid PRIMARY KEY,
+			run_id uuid NOT NULL REFERENCES %s.audit_runs(id) ON DELETE CASCADE,
+			channel text NOT NULL,
+			touchpoint_count integer NOT NULL,
 			created_at timestamptz NOT NULL DEFAULT now()
 		)`, schema, schema))
 	if err != nil {
@@ -677,6 +822,14 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 		return err
 	}
 	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_scholar_gaps_tier_idx ON %s.audit_scholar_gaps (tier)`, schema, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_program_summary_run_idx ON %s.audit_program_summary (run_id)`, schema, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_channel_summary_run_idx ON %s.audit_channel_summary (run_id)`, schema, schema))
 	return err
 }
 

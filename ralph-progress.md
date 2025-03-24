@@ -14,3 +14,8 @@
 - Added alert CSV export with configurable minimum tier for follow-up lists.
 - Included first-contact dates in summaries and exports for context.
 - Documented alert export usage in the README.
+
+## Iteration 54
+- Added database seeding support to initialize the Postgres schema only when empty.
+- Expanded DB persistence to capture first-contact dates plus program/channel summaries.
+- Documented seed workflow and audit tables in the README.

@@ -43,7 +43,14 @@ export TOUCHPOINT_GAP_AUDIT_DB_URL="postgres://user:pass@host:port/dbname"
 go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --db --db-tag "weekly-touchpoints"
 ```
 
-Tables are created in the `touchpoint_gap_audit` schema by default. Override with `--db-schema`.
+Initialize the schema and seed it (only if empty):
+
+```bash
+export TOUCHPOINT_GAP_AUDIT_DB_URL="postgres://user:pass@host:port/dbname"
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --init-db
+```
+
+Tables are created in the `touchpoint_gap_audit` schema by default. Override with `--db-schema`. Stored tables include `audit_runs`, `audit_scholar_gaps`, `audit_program_summary`, and `audit_channel_summary`.
 
 ## CSV Format
 
