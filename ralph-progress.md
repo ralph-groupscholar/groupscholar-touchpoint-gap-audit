@@ -19,3 +19,7 @@
 - Added database seeding support to initialize the Postgres schema only when empty.
 - Expanded DB persistence to capture first-contact dates plus program/channel summaries.
 - Documented seed workflow and audit tables in the README.
+
+## Iteration 82
+- Added optional CSV exports for program and channel summaries to support downstream reporting.
+- Documented new summary export flags in the README.

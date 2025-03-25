@@ -44,8 +44,10 @@ type ScholarSummary struct {
 	LastStatus   string    `json:"last_status"`
 	LastContact  time.Time `json:"last_contact"`
 	FirstContact time.Time `json:"first_contact"`
+	NextDueDate  time.Time `json:"next_due_date"`
 	ContactCount int       `json:"contact_count"`
 	GapDays      int       `json:"gap_days"`
+	DaysPastDue  int       `json:"days_past_due"`
 	Tier         string    `json:"tier"`
 }
 
@@ -96,6 +98,8 @@ func main() {
 	topN := flag.Int("top", defaultTopN, "Top N largest gaps to show")
 	jsonOut := flag.String("json", "", "Optional JSON output path")
 	alertsOut := flag.String("alerts", "", "Optional CSV output for alert tiers")
+	programsOut := flag.String("programs-csv", "", "Optional CSV output for program summary")
+	channelsOut := flag.String("channels-csv", "", "Optional CSV output for channel summary")
 	minTier := flag.String("min-tier", "overdue", "Minimum tier for alerts (due_soon, overdue, critical)")
 	dbEnabled := flag.Bool("db", false, "Store report in Postgres (requires TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL)")
 	dbSchema := flag.String("db-schema", "touchpoint_gap_audit", "Postgres schema for audit tables")
@@ -144,6 +148,18 @@ func main() {
 			exitWithError(err)
 		}
 		fmt.Printf("Alert CSV saved to %s\n", *alertsOut)
+	}
+	if *programsOut != "" {
+		if err := writeProgramCSV(report, *programsOut); err != nil {
+			exitWithError(err)
+		}
+		fmt.Printf("Program summary CSV saved to %s\n", *programsOut)
+	}
+	if *channelsOut != "" {
+		if err := writeChannelCSV(report, *channelsOut); err != nil {
+			exitWithError(err)
+		}
+		fmt.Printf("Channel summary CSV saved to %s\n", *channelsOut)
 	}
 
 	if *dbEnabled || *initDB {
@@ -286,6 +302,14 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 	for _, scholar := range stats {
 		gap := gapDays(asOf, scholar.LastContact)
 		tier := gapTier(gap, cadenceDays, dueWindowDays)
+		nextDueDate := time.Time{}
+		daysPastDue := 0
+		if !scholar.LastContact.IsZero() {
+			nextDueDate = dateOnly(scholar.LastContact.AddDate(0, 0, cadenceDays))
+			if gap > cadenceDays {
+				daysPastDue = gap - cadenceDays
+			}
+		}
 		summary := ScholarSummary{
 			ScholarID:    scholar.ScholarID,
 			Program:      scholar.Program,
@@ -293,8 +317,10 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 			LastStatus:   scholar.LastStatus,
 			LastContact:  scholar.LastContact,
 			FirstContact: scholar.FirstContact,
+			NextDueDate:  nextDueDate,
 			ContactCount: scholar.ContactCount,
 			GapDays:      gap,
+			DaysPastDue:  daysPastDue,
 			Tier:         tier,
 		}
 		summaries = append(summaries, summary)
@@ -653,15 +679,16 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 	insertScholarSQL := fmt.Sprintf(`
 		INSERT INTO %s.audit_scholar_gaps (
 			id, run_id, scholar_id, program, last_channel, last_status,
-			last_contact, first_contact, contact_count, gap_days, tier
+			last_contact, first_contact, next_due_date, contact_count, gap_days, days_past_due, tier
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,
-			$7,$8,$9,$10,$11
+			$7,$8,$9,$10,$11,$12,$13
 		)`, schema)
 
 	for _, entry := range report.Scholars {
 		lastContact := nullDate(entry.LastContact)
 		firstContact := nullDate(entry.FirstContact)
+		nextDue := nullDate(entry.NextDueDate)
 		_, err = tx.ExecContext(ctx, insertScholarSQL,
 			uuid.New(),
 			runID,
@@ -671,8 +698,10 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 			nullString(entry.LastStatus),
 			lastContact,
 			firstContact,
+			nextDue,
 			entry.ContactCount,
 			entry.GapDays,
+			entry.DaysPastDue,
 			entry.Tier,
 		)
 		if err != nil {
@@ -771,8 +800,10 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 			last_status text,
 			last_contact date,
 			first_contact date,
+			next_due_date date,
 			contact_count integer NOT NULL,
 			gap_days integer NOT NULL,
+			days_past_due integer NOT NULL,
 			tier text NOT NULL,
 			created_at timestamptz NOT NULL DEFAULT now()
 		)`, schema, schema))
@@ -783,6 +814,20 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 	_, err = db.ExecContext(ctx, fmt.Sprintf(`
 		ALTER TABLE %s.audit_scholar_gaps
 		ADD COLUMN IF NOT EXISTS first_contact date
+	`, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		ALTER TABLE %s.audit_scholar_gaps
+		ADD COLUMN IF NOT EXISTS next_due_date date
+	`, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		ALTER TABLE %s.audit_scholar_gaps
+		ADD COLUMN IF NOT EXISTS days_past_due integer NOT NULL DEFAULT 0
 	`, schema))
 	if err != nil {
 		return err
@@ -865,7 +910,9 @@ func writeAlertsCSV(report Report, path string, minTier string) error {
 		"program",
 		"last_contact",
 		"first_contact",
+		"next_due_date",
 		"gap_days",
+		"days_past_due",
 		"tier",
 		"last_channel",
 		"last_status",
@@ -884,11 +931,85 @@ func writeAlertsCSV(report Report, path string, minTier string) error {
 			entry.Program,
 			formatDate(entry.LastContact),
 			formatDate(entry.FirstContact),
+			formatDate(entry.NextDueDate),
 			fmt.Sprintf("%d", entry.GapDays),
+			fmt.Sprintf("%d", entry.DaysPastDue),
 			entry.Tier,
 			entry.LastChannel,
 			entry.LastStatus,
 			fmt.Sprintf("%d", entry.ContactCount),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeProgramCSV(report Report, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"program",
+		"scholars",
+		"avg_gap_days",
+		"on_track",
+		"due_soon",
+		"overdue",
+		"critical",
+	}); err != nil {
+		return err
+	}
+
+	for _, entry := range report.ProgramSummary {
+		record := []string{
+			entry.Program,
+			fmt.Sprintf("%d", entry.Scholars),
+			fmt.Sprintf("%.1f", entry.AvgGapDays),
+			fmt.Sprintf("%d", entry.OnTrackCount),
+			fmt.Sprintf("%d", entry.DueSoonCount),
+			fmt.Sprintf("%d", entry.OverdueCount),
+			fmt.Sprintf("%d", entry.CriticalCount),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeChannelCSV(report Report, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"channel",
+		"touchpoint_count",
+	}); err != nil {
+		return err
+	}
+
+	channels := make([]string, 0, len(report.ChannelSummary))
+	for channel := range report.ChannelSummary {
+		channels = append(channels, channel)
+	}
+	sort.Strings(channels)
+
+	for _, channel := range channels {
+		record := []string{
+			channel,
+			fmt.Sprintf("%d", report.ChannelSummary[channel]),
 		}
 		if err := writer.Write(record); err != nil {
 			return err

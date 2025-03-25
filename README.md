@@ -8,7 +8,7 @@ Group Scholar Touchpoint Gap Audit is a local-first Go CLI that scans outreach l
 - Compute gap tiers (on track, due soon, overdue, critical).
 - Summarize program-level gap health and last-channel distribution.
 - Emit a JSON report for downstream dashboards.
-- Export alert-ready CSVs for overdue and critical follow-ups.
+- Export alert-ready CSVs for overdue and critical follow-ups, including next due dates.
 
 ## Usage
 
@@ -34,6 +34,14 @@ Include due-soon alerts too:
 go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --alerts alerts.csv --min-tier due_soon
 ```
 
+Program and channel summary CSVs:
+
+```bash
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --programs-csv programs.csv --channels-csv channels.csv
+```
+
+Alert exports now include `next_due_date` and `days_past_due` for follow-up planning.
+
 ## Database storage
 
 Store audit runs in Postgres for longitudinal tracking.
@@ -50,7 +58,7 @@ export TOUCHPOINT_GAP_AUDIT_DB_URL="postgres://user:pass@host:port/dbname"
 go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --init-db
 ```
 
-Tables are created in the `touchpoint_gap_audit` schema by default. Override with `--db-schema`. Stored tables include `audit_runs`, `audit_scholar_gaps`, `audit_program_summary`, and `audit_channel_summary`.
+Tables are created in the `touchpoint_gap_audit` schema by default. Override with `--db-schema`. Stored tables include `audit_runs`, `audit_scholar_gaps` (with next-due-date tracking), `audit_program_summary`, and `audit_channel_summary`.
 
 ## CSV Format
 
