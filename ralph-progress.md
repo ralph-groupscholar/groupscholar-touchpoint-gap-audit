@@ -23,3 +23,13 @@
 ## Iteration 82
 - Added optional CSV exports for program and channel summaries to support downstream reporting.
 - Documented new summary export flags in the README.
+
+## Iteration 100
+- Added next-due-date and days-past-due calculations for each scholar.
+- Expanded alert exports and JSON/DB persistence to include due-date fields.
+- Updated schema migrations and documentation to reflect the new follow-up planning data.
+
+## Iteration 18
+- Ignored future-dated touchpoints when running historical audits and surfaced the skipped row count.
+- Persisted future-row counts in JSON output and Postgres audit runs for longitudinal tracking.
+- Updated README feature list to document the new as-of behavior.

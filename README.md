@@ -9,6 +9,7 @@ Group Scholar Touchpoint Gap Audit is a local-first Go CLI that scans outreach l
 - Summarize program-level gap health and last-channel distribution.
 - Emit a JSON report for downstream dashboards.
 - Export alert-ready CSVs for overdue and critical follow-ups, including next due dates.
+- Ignore future-dated touchpoints relative to `--as-of` and report how many were skipped.
 
 ## Usage
 
