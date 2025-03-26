@@ -29,6 +29,11 @@
 - Expanded alert exports and JSON/DB persistence to include due-date fields.
 - Updated schema migrations and documentation to reflect the new follow-up planning data.
 
+## Iteration 16
+- Added engagement tempo metrics (days since first contact, average interval, contacts per month) to scholar summaries.
+- Expanded alert exports and Postgres storage to capture the new tempo fields.
+- Seeded Postgres with a fresh audit run (run_id: 78846308-a2b7-4054-9207-d3bdd272414d).
+
 ## Iteration 18
 - Ignored future-dated touchpoints when running historical audits and surfaced the skipped row count.
 - Persisted future-row counts in JSON output and Postgres audit runs for longitudinal tracking.

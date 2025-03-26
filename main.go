@@ -39,20 +39,20 @@ type ScholarStats struct {
 }
 
 type ScholarSummary struct {
-	ScholarID           string    `json:"scholar_id"`
-	Program             string    `json:"program"`
-	LastChannel         string    `json:"last_channel"`
-	LastStatus          string    `json:"last_status"`
-	LastContact         time.Time `json:"last_contact"`
-	FirstContact        time.Time `json:"first_contact"`
-	NextDueDate         time.Time `json:"next_due_date"`
-	ContactCount        int       `json:"contact_count"`
-	GapDays             int       `json:"gap_days"`
-	DaysPastDue         int       `json:"days_past_due"`
-	DaysSinceFirst      int       `json:"days_since_first_contact"`
-	AvgIntervalDays     float64   `json:"avg_interval_days"`
-	ContactsPerMonth    float64   `json:"contacts_per_month"`
-	Tier                string    `json:"tier"`
+	ScholarID        string    `json:"scholar_id"`
+	Program          string    `json:"program"`
+	LastChannel      string    `json:"last_channel"`
+	LastStatus       string    `json:"last_status"`
+	LastContact      time.Time `json:"last_contact"`
+	FirstContact     time.Time `json:"first_contact"`
+	NextDueDate      time.Time `json:"next_due_date"`
+	ContactCount     int       `json:"contact_count"`
+	GapDays          int       `json:"gap_days"`
+	DaysPastDue      int       `json:"days_past_due"`
+	DaysSinceFirst   int       `json:"days_since_first_contact"`
+	AvgIntervalDays  float64   `json:"avg_interval_days"`
+	ContactsPerMonth float64   `json:"contacts_per_month"`
+	Tier             string    `json:"tier"`
 }
 
 type ProgramSummary struct {
@@ -288,7 +288,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 
 		scholar, exists := stats[scholarID]
 		if !exists {
-		scholar = &ScholarStats{ScholarID: scholarID, Channels: map[string]int{}}
+			scholar = &ScholarStats{ScholarID: scholarID, Channels: map[string]int{}}
 			stats[scholarID] = scholar
 		}
 		scholar.ContactCount++
@@ -327,7 +327,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 		daysPastDue := 0
 		daysSinceFirst := 0
 		avgInterval := 0.0
-		contactsPerMonth := 0.0
+		contactsPerMonthRate := 0.0
 		if !scholar.LastContact.IsZero() {
 			nextDueDate = dateOnly(scholar.LastContact.AddDate(0, 0, cadenceDays))
 			if gap > cadenceDays {
@@ -337,7 +337,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 		if !scholar.FirstContact.IsZero() {
 			daysSinceFirst = gapDays(asOf, scholar.FirstContact)
 			avgInterval = averageIntervalDays(scholar.Contacts)
-			contactsPerMonth = contactsPerMonth(scholar.ContactCount, daysSinceFirst)
+			contactsPerMonthRate = contactsPerMonth(scholar.ContactCount, daysSinceFirst)
 		}
 		summary := ScholarSummary{
 			ScholarID:        scholar.ScholarID,
@@ -352,7 +352,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 			DaysPastDue:      daysPastDue,
 			DaysSinceFirst:   daysSinceFirst,
 			AvgIntervalDays:  avgInterval,
-			ContactsPerMonth: contactsPerMonth,
+			ContactsPerMonth: contactsPerMonthRate,
 			Tier:             tier,
 		}
 		summaries = append(summaries, summary)
