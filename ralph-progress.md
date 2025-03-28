@@ -1,5 +1,15 @@
 # Ralph Progress Log
 
+## Iteration 100
+- Added due-date bucket summaries to highlight upcoming outreach windows and overdue load.
+- Added `--due-csv` export plus report console output for the new due buckets.
+- Added tests covering due-bucket classification logic and updated documentation.
+
+## Iteration 116
+- Added `--dedupe-day` to collapse multiple same-day touchpoints per scholar without losing last-status context.
+- Updated documentation with the new dedupe option.
+- Added Go tests covering deduped vs raw contact cadence calculations.
+
 ## Iteration 44
 - Rolled a 10 and started groupscholar-touchpoint-gap-audit, a Go CLI that audits scholar outreach logs for cadence gaps.
 - Implemented CSV parsing, gap tiering, program/channel rollups, and optional JSON exports.
@@ -28,13 +38,3 @@
 - Added next-due-date and days-past-due calculations for each scholar.
 - Expanded alert exports and JSON/DB persistence to include due-date fields.
 - Updated schema migrations and documentation to reflect the new follow-up planning data.
-
-## Iteration 16
-- Added engagement tempo metrics (days since first contact, average interval, contacts per month) to scholar summaries.
-- Expanded alert exports and Postgres storage to capture the new tempo fields.
-- Seeded Postgres with a fresh audit run (run_id: 78846308-a2b7-4054-9207-d3bdd272414d).
-
-## Iteration 18
-- Ignored future-dated touchpoints when running historical audits and surfaced the skipped row count.
-- Persisted future-row counts in JSON output and Postgres audit runs for longitudinal tracking.
-- Updated README feature list to document the new as-of behavior.

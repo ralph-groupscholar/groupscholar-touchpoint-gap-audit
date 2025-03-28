@@ -36,6 +36,7 @@ type ScholarStats struct {
 	FirstContact time.Time
 	Channels     map[string]int
 	Contacts     []time.Time
+	ContactDates map[string]struct{}
 }
 
 type ScholarSummary struct {
@@ -49,6 +50,7 @@ type ScholarSummary struct {
 	ContactCount     int       `json:"contact_count"`
 	GapDays          int       `json:"gap_days"`
 	DaysPastDue      int       `json:"days_past_due"`
+	MissedCadences   int       `json:"missed_cadences"`
 	DaysSinceFirst   int       `json:"days_since_first_contact"`
 	AvgIntervalDays  float64   `json:"avg_interval_days"`
 	ContactsPerMonth float64   `json:"contacts_per_month"`
@@ -56,38 +58,49 @@ type ScholarSummary struct {
 }
 
 type ProgramSummary struct {
-	Program       string  `json:"program"`
-	Scholars      int     `json:"scholars"`
-	AvgGapDays    float64 `json:"avg_gap_days"`
-	OverdueCount  int     `json:"overdue_count"`
-	CriticalCount int     `json:"critical_count"`
-	OnTrackCount  int     `json:"on_track_count"`
-	DueSoonCount  int     `json:"due_soon_count"`
+	Program           string  `json:"program"`
+	Scholars          int     `json:"scholars"`
+	AvgGapDays        float64 `json:"avg_gap_days"`
+	AvgMissedCadences float64 `json:"avg_missed_cadences"`
+	OverdueCount      int     `json:"overdue_count"`
+	CriticalCount     int     `json:"critical_count"`
+	OnTrackCount      int     `json:"on_track_count"`
+	DueSoonCount      int     `json:"due_soon_count"`
 }
 
 type ReportSummary struct {
-	AsOf          string  `json:"as_of"`
-	CadenceDays   int     `json:"cadence_days"`
-	DueWindowDays int     `json:"due_window_days"`
-	TotalScholars int     `json:"total_scholars"`
-	AvgGapDays    float64 `json:"avg_gap_days"`
-	MedianGapDays float64 `json:"median_gap_days"`
-	MaxGapDays    int     `json:"max_gap_days"`
-	OnTrackCount  int     `json:"on_track_count"`
-	DueSoonCount  int     `json:"due_soon_count"`
-	OverdueCount  int     `json:"overdue_count"`
-	CriticalCount int     `json:"critical_count"`
-	InvalidRows   int     `json:"invalid_rows"`
-	FutureRows    int     `json:"future_rows"`
+	AsOf              string  `json:"as_of"`
+	CadenceDays       int     `json:"cadence_days"`
+	DueWindowDays     int     `json:"due_window_days"`
+	TotalScholars     int     `json:"total_scholars"`
+	AvgGapDays        float64 `json:"avg_gap_days"`
+	MedianGapDays     float64 `json:"median_gap_days"`
+	MaxGapDays        int     `json:"max_gap_days"`
+	AvgMissedCadences float64 `json:"avg_missed_cadences"`
+	MaxMissedCadences int     `json:"max_missed_cadences"`
+	OnTrackCount      int     `json:"on_track_count"`
+	DueSoonCount      int     `json:"due_soon_count"`
+	OverdueCount      int     `json:"overdue_count"`
+	CriticalCount     int     `json:"critical_count"`
+	InvalidRows       int     `json:"invalid_rows"`
+	FutureRows        int     `json:"future_rows"`
 }
 
 type Report struct {
-	Summary        ReportSummary    `json:"summary"`
-	ProgramSummary []ProgramSummary `json:"program_summary"`
-	ChannelSummary map[string]int   `json:"last_channel_summary"`
-	StatusSummary  map[string]int   `json:"last_status_summary"`
-	TopGaps        []ScholarSummary `json:"top_gaps"`
-	Scholars       []ScholarSummary `json:"scholars"`
+	Summary        ReportSummary      `json:"summary"`
+	ProgramSummary []ProgramSummary   `json:"program_summary"`
+	ChannelSummary map[string]int     `json:"last_channel_summary"`
+	StatusSummary  map[string]int     `json:"last_status_summary"`
+	DueSummary     []DueBucketSummary `json:"due_summary"`
+	TopGaps        []ScholarSummary   `json:"top_gaps"`
+	Scholars       []ScholarSummary   `json:"scholars"`
+}
+
+type DueBucketSummary struct {
+	Label   string `json:"label"`
+	MinDays *int   `json:"min_days,omitempty"`
+	MaxDays *int   `json:"max_days,omitempty"`
+	Count   int    `json:"count"`
 }
 
 type DBConfig struct {
@@ -102,11 +115,13 @@ func main() {
 	asOf := flag.String("as-of", "", "Report as-of date (YYYY-MM-DD)")
 	dueWindow := flag.Int("due-window", 0, "Days after cadence before overdue; default cadence/2")
 	topN := flag.Int("top", defaultTopN, "Top N largest gaps to show")
+	dedupeDay := flag.Bool("dedupe-day", false, "Deduplicate multiple contacts on the same day per scholar")
 	jsonOut := flag.String("json", "", "Optional JSON output path")
 	alertsOut := flag.String("alerts", "", "Optional CSV output for alert tiers")
 	programsOut := flag.String("programs-csv", "", "Optional CSV output for program summary")
 	channelsOut := flag.String("channels-csv", "", "Optional CSV output for channel summary")
 	statusesOut := flag.String("statuses-csv", "", "Optional CSV output for last status summary")
+	dueOut := flag.String("due-csv", "", "Optional CSV output for due-date buckets")
 	minTier := flag.String("min-tier", "overdue", "Minimum tier for alerts (due_soon, overdue, critical)")
 	dbEnabled := flag.Bool("db", false, "Store report in Postgres (requires TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL)")
 	dbSchema := flag.String("db-schema", "touchpoint_gap_audit", "Postgres schema for audit tables")
@@ -136,7 +151,7 @@ func main() {
 		dueWindowDays = int(math.Ceil(float64(*cadenceDays) * 0.5))
 	}
 
-	report, err := buildReport(*inputPath, asOfDate, *cadenceDays, dueWindowDays, *topN)
+	report, err := buildReport(*inputPath, asOfDate, *cadenceDays, dueWindowDays, *topN, *dedupeDay)
 	if err != nil {
 		exitWithError(err)
 	}
@@ -174,6 +189,12 @@ func main() {
 		}
 		fmt.Printf("Status summary CSV saved to %s\n", *statusesOut)
 	}
+	if *dueOut != "" {
+		if err := writeDueCSV(report, *dueOut); err != nil {
+			exitWithError(err)
+		}
+		fmt.Printf("Due summary CSV saved to %s\n", *dueOut)
+	}
 
 	if *dbEnabled || *initDB {
 		dbURL := dbURLFromEnv()
@@ -210,7 +231,7 @@ func main() {
 	}
 }
 
-func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int, topN int) (Report, error) {
+func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int, topN int, dedupeDay bool) (Report, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Report{}, err
@@ -291,6 +312,24 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 			scholar = &ScholarStats{ScholarID: scholarID, Channels: map[string]int{}}
 			stats[scholarID] = scholar
 		}
+		if program != "" && scholar.Program == "" {
+			scholar.Program = program
+		}
+		if dedupeDay {
+			if scholar.ContactDates == nil {
+				scholar.ContactDates = map[string]struct{}{}
+			}
+			dateKey := dateOnly(parsedDate).Format("2006-01-02")
+			if _, seen := scholar.ContactDates[dateKey]; seen {
+				if scholar.LastContact.IsZero() || parsedDate.After(scholar.LastContact) || parsedDate.Equal(scholar.LastContact) {
+					scholar.LastContact = parsedDate
+					scholar.LastChannel = channel
+					scholar.LastStatus = status
+				}
+				continue
+			}
+			scholar.ContactDates[dateKey] = struct{}{}
+		}
 		scholar.ContactCount++
 		scholar.Contacts = append(scholar.Contacts, parsedDate)
 		if !scholar.FirstContact.IsZero() {
@@ -299,10 +338,6 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 			}
 		} else {
 			scholar.FirstContact = parsedDate
-		}
-
-		if program != "" && scholar.Program == "" {
-			scholar.Program = program
 		}
 		if channel != "" {
 			scholar.Channels[channel]++
@@ -316,12 +351,15 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 
 	summaries := make([]ScholarSummary, 0, len(stats))
 	gapValues := make([]int, 0, len(stats))
+	missedCadencesTotal := 0
+	maxMissedCadences := 0
 	channelSummary := map[string]int{}
 	statusSummary := map[string]int{}
 	programBuckets := map[string][]ScholarSummary{}
 
 	for _, scholar := range stats {
 		gap := gapDays(asOf, scholar.LastContact)
+		missedCadencesValue := missedCadences(gap, cadenceDays)
 		tier := gapTier(gap, cadenceDays, dueWindowDays)
 		nextDueDate := time.Time{}
 		daysPastDue := 0
@@ -350,6 +388,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 			ContactCount:     scholar.ContactCount,
 			GapDays:          gap,
 			DaysPastDue:      daysPastDue,
+			MissedCadences:   missedCadencesValue,
 			DaysSinceFirst:   daysSinceFirst,
 			AvgIntervalDays:  avgInterval,
 			ContactsPerMonth: contactsPerMonthRate,
@@ -357,6 +396,10 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 		}
 		summaries = append(summaries, summary)
 		gapValues = append(gapValues, gap)
+		missedCadencesTotal += missedCadencesValue
+		if missedCadencesValue > maxMissedCadences {
+			maxMissedCadences = missedCadencesValue
+		}
 		if summary.LastChannel != "" {
 			channelSummary[summary.LastChannel]++
 		}
@@ -389,28 +432,35 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 	}
 
 	avgGap, medianGap, maxGap := summarizeGaps(gapValues)
+	avgMissedCadences := 0.0
+	if len(summaries) > 0 {
+		avgMissedCadences = round1(float64(missedCadencesTotal) / float64(len(summaries)))
+	}
 
 	onTrack, dueSoon, overdue, critical := countTiers(summaries)
 
 	report := Report{
 		Summary: ReportSummary{
-			AsOf:          asOf.Format("2006-01-02"),
-			CadenceDays:   cadenceDays,
-			DueWindowDays: dueWindowDays,
-			TotalScholars: len(summaries),
-			AvgGapDays:    avgGap,
-			MedianGapDays: medianGap,
-			MaxGapDays:    maxGap,
-			OnTrackCount:  onTrack,
-			DueSoonCount:  dueSoon,
-			OverdueCount:  overdue,
-			CriticalCount: critical,
-			InvalidRows:   invalidRows,
-			FutureRows:    futureRows,
+			AsOf:              asOf.Format("2006-01-02"),
+			CadenceDays:       cadenceDays,
+			DueWindowDays:     dueWindowDays,
+			TotalScholars:     len(summaries),
+			AvgGapDays:        avgGap,
+			MedianGapDays:     medianGap,
+			MaxGapDays:        maxGap,
+			AvgMissedCadences: avgMissedCadences,
+			MaxMissedCadences: maxMissedCadences,
+			OnTrackCount:      onTrack,
+			DueSoonCount:      dueSoon,
+			OverdueCount:      overdue,
+			CriticalCount:     critical,
+			InvalidRows:       invalidRows,
+			FutureRows:        futureRows,
 		},
 		ProgramSummary: programSummary,
 		ChannelSummary: channelSummary,
 		StatusSummary:  statusSummary,
+		DueSummary:     buildDueSummary(summaries, asOfDate),
 		TopGaps:        topGaps,
 		Scholars:       summaries,
 	}
@@ -423,8 +473,10 @@ func buildProgramSummary(buckets map[string][]ScholarSummary) []ProgramSummary {
 	for program, entries := range buckets {
 		gaps := make([]int, 0, len(entries))
 		programSummary := ProgramSummary{Program: program, Scholars: len(entries)}
+		missedTotal := 0
 		for _, entry := range entries {
 			gaps = append(gaps, entry.GapDays)
+			missedTotal += entry.MissedCadences
 			switch entry.Tier {
 			case "on_track":
 				programSummary.OnTrackCount++
@@ -438,6 +490,9 @@ func buildProgramSummary(buckets map[string][]ScholarSummary) []ProgramSummary {
 		}
 		avgGap, _, _ := summarizeGaps(gaps)
 		programSummary.AvgGapDays = avgGap
+		if programSummary.Scholars > 0 {
+			programSummary.AvgMissedCadences = round1(float64(missedTotal) / float64(programSummary.Scholars))
+		}
 		result = append(result, programSummary)
 	}
 	return result
@@ -548,6 +603,16 @@ func gapTier(gap int, cadenceDays int, dueWindowDays int) string {
 	return "critical"
 }
 
+func missedCadences(gap int, cadenceDays int) int {
+	if cadenceDays <= 0 {
+		return 0
+	}
+	if gap <= cadenceDays {
+		return 0
+	}
+	return (gap-cadenceDays+cadenceDays-1)/cadenceDays
+}
+
 func printReport(report Report, inputPath string) {
 	fmt.Println("Group Scholar Touchpoint Gap Audit")
 	fmt.Println(strings.Repeat("=", 38))
@@ -556,12 +621,16 @@ func printReport(report Report, inputPath string) {
 	fmt.Printf("Cadence: %d days (due window %d days)\n", report.Summary.CadenceDays, report.Summary.DueWindowDays)
 	fmt.Printf("Total scholars: %d\n", report.Summary.TotalScholars)
 	fmt.Printf("Gap avg/median/max: %.1f / %.1f / %d days\n", report.Summary.AvgGapDays, report.Summary.MedianGapDays, report.Summary.MaxGapDays)
+	fmt.Printf("Missed cadences avg/max: %.1f / %d\n", report.Summary.AvgMissedCadences, report.Summary.MaxMissedCadences)
 	fmt.Printf("On track: %d | Due soon: %d | Overdue: %d | Critical: %d\n", report.Summary.OnTrackCount, report.Summary.DueSoonCount, report.Summary.OverdueCount, report.Summary.CriticalCount)
 	if report.Summary.InvalidRows > 0 {
 		fmt.Printf("Invalid rows skipped: %d\n", report.Summary.InvalidRows)
 	}
 	if report.Summary.FutureRows > 0 {
 		fmt.Printf("Future-dated rows ignored: %d\n", report.Summary.FutureRows)
+	}
+	if len(report.DueSummary) > 0 {
+		fmt.Printf("Due buckets: %s\n", formatDueSummary(report.DueSummary))
 	}
 
 	fmt.Println("\nTop gaps")
@@ -593,10 +662,11 @@ func printReport(report Report, inputPath string) {
 		fmt.Println("\nProgram summary")
 		fmt.Println(strings.Repeat("-", 38))
 		for _, entry := range report.ProgramSummary {
-			fmt.Printf("%s | scholars %d | avg gap %.1f | on track %d | due soon %d | overdue %d | critical %d\n",
+			fmt.Printf("%s | scholars %d | avg gap %.1f | avg missed %.1f | on track %d | due soon %d | overdue %d | critical %d\n",
 				entry.Program,
 				entry.Scholars,
 				entry.AvgGapDays,
+				entry.AvgMissedCadences,
 				entry.OnTrackCount,
 				entry.DueSoonCount,
 				entry.OverdueCount,
@@ -740,12 +810,14 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s.audit_runs (
 			id, as_of, cadence_days, due_window_days, total_scholars,
-			avg_gap_days, median_gap_days, max_gap_days, on_track_count,
-			due_soon_count, overdue_count, critical_count, invalid_rows, future_rows, run_tag
+			avg_gap_days, median_gap_days, max_gap_days, avg_missed_cadences,
+			max_missed_cadences, on_track_count, due_soon_count, overdue_count,
+			critical_count, invalid_rows, future_rows, run_tag
 		) VALUES (
 			$1,$2,$3,$4,$5,
-			$6,$7,$8,$9,
-			$10,$11,$12,$13,$14,$15
+			$6,$7,$8,$9,$10,
+			$11,$12,$13,$14,
+			$15,$16,$17,$18
 		)`, schema),
 		runID,
 		dateOnly(asOfDate),
@@ -755,6 +827,8 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 		report.Summary.AvgGapDays,
 		report.Summary.MedianGapDays,
 		report.Summary.MaxGapDays,
+		report.Summary.AvgMissedCadences,
+		report.Summary.MaxMissedCadences,
 		report.Summary.OnTrackCount,
 		report.Summary.DueSoonCount,
 		report.Summary.OverdueCount,
@@ -1079,6 +1153,7 @@ func writeAlertsCSV(report Report, path string, minTier string) error {
 		"next_due_date",
 		"gap_days",
 		"days_past_due",
+		"missed_cadences",
 		"days_since_first_contact",
 		"avg_interval_days",
 		"contacts_per_month",
@@ -1103,6 +1178,7 @@ func writeAlertsCSV(report Report, path string, minTier string) error {
 			formatDate(entry.NextDueDate),
 			fmt.Sprintf("%d", entry.GapDays),
 			fmt.Sprintf("%d", entry.DaysPastDue),
+			fmt.Sprintf("%d", entry.MissedCadences),
 			fmt.Sprintf("%d", entry.DaysSinceFirst),
 			fmt.Sprintf("%.1f", entry.AvgIntervalDays),
 			fmt.Sprintf("%.1f", entry.ContactsPerMonth),
@@ -1131,6 +1207,7 @@ func writeProgramCSV(report Report, path string) error {
 		"program",
 		"scholars",
 		"avg_gap_days",
+		"avg_missed_cadences",
 		"on_track",
 		"due_soon",
 		"overdue",
@@ -1144,6 +1221,7 @@ func writeProgramCSV(report Report, path string) error {
 			entry.Program,
 			fmt.Sprintf("%d", entry.Scholars),
 			fmt.Sprintf("%.1f", entry.AvgGapDays),
+			fmt.Sprintf("%.1f", entry.AvgMissedCadences),
 			fmt.Sprintf("%d", entry.OnTrackCount),
 			fmt.Sprintf("%d", entry.DueSoonCount),
 			fmt.Sprintf("%d", entry.OverdueCount),
@@ -1216,6 +1294,38 @@ func writeStatusCSV(report Report, path string) error {
 		record := []string{
 			status,
 			fmt.Sprintf("%d", report.StatusSummary[status]),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
+func writeDueCSV(report Report, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"label",
+		"min_days",
+		"max_days",
+		"count",
+	}); err != nil {
+		return err
+	}
+
+	for _, entry := range report.DueSummary {
+		record := []string{
+			entry.Label,
+			formatOptionalInt(entry.MinDays),
+			formatOptionalInt(entry.MaxDays),
+			fmt.Sprintf("%d", entry.Count),
 		}
 		if err := writer.Write(record); err != nil {
 			return err
@@ -1309,6 +1419,95 @@ func dateOnly(value time.Time) time.Time {
 		return value
 	}
 	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, value.Location())
+}
+
+func buildDueSummary(entries []ScholarSummary, asOf time.Time) []DueBucketSummary {
+	defs := dueBucketDefinitions()
+	result := make([]DueBucketSummary, len(defs))
+	for idx, def := range defs {
+		result[idx] = DueBucketSummary{
+			Label:   def.Label,
+			MinDays: def.MinDays,
+			MaxDays: def.MaxDays,
+		}
+	}
+	index := map[string]int{}
+	for idx, def := range defs {
+		index[def.Label] = idx
+	}
+	for _, entry := range entries {
+		label := bucketDueLabel(entry.NextDueDate, asOf)
+		if pos, ok := index[label]; ok {
+			result[pos].Count++
+		}
+	}
+	return result
+}
+
+type dueBucketDefinition struct {
+	Label   string
+	MinDays *int
+	MaxDays *int
+}
+
+func dueBucketDefinitions() []dueBucketDefinition {
+	return []dueBucketDefinition{
+		{Label: "overdue", MaxDays: intPtr(-1)},
+		{Label: "due_0_7", MinDays: intPtr(0), MaxDays: intPtr(7)},
+		{Label: "due_8_14", MinDays: intPtr(8), MaxDays: intPtr(14)},
+		{Label: "due_15_30", MinDays: intPtr(15), MaxDays: intPtr(30)},
+		{Label: "due_31_60", MinDays: intPtr(31), MaxDays: intPtr(60)},
+		{Label: "due_61_plus", MinDays: intPtr(61)},
+		{Label: "unknown", MinDays: nil, MaxDays: nil},
+	}
+}
+
+func bucketDueLabel(nextDue time.Time, asOf time.Time) string {
+	if nextDue.IsZero() {
+		return "unknown"
+	}
+	asOfDate := dateOnly(asOf)
+	dueDate := dateOnly(nextDue)
+	daysUntil := int(dueDate.Sub(asOfDate).Hours() / 24)
+	switch {
+	case daysUntil < 0:
+		return "overdue"
+	case daysUntil <= 7:
+		return "due_0_7"
+	case daysUntil <= 14:
+		return "due_8_14"
+	case daysUntil <= 30:
+		return "due_15_30"
+	case daysUntil <= 60:
+		return "due_31_60"
+	default:
+		return "due_61_plus"
+	}
+}
+
+func formatDueSummary(entries []DueBucketSummary) string {
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Count == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", entry.Label, entry.Count))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatOptionalInt(value *int) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func exitWithError(err error) {

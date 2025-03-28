@@ -10,7 +10,9 @@ Group Scholar Touchpoint Gap Audit is a local-first Go CLI that scans outreach l
 - Capture engagement tempo metrics (average interval, contacts per month).
 - Emit a JSON report for downstream dashboards.
 - Export alert-ready CSVs for overdue and critical follow-ups, including next due dates.
+- Provide due-date bucket summaries for upcoming outreach planning.
 - Ignore future-dated touchpoints relative to `--as-of` and report how many were skipped.
+- Optionally dedupe multiple contacts on the same day per scholar.
 
 ## Usage
 
@@ -46,6 +48,18 @@ Program and status summary CSVs:
 
 ```bash
 go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --programs-csv programs.csv --statuses-csv statuses.csv
+```
+
+Due-date bucket CSV:
+
+```bash
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --due-csv due-buckets.csv
+```
+
+Deduplicate multiple contacts logged on the same day:
+
+```bash
+go run . --input sample/touchpoints.csv --as-of 2026-02-07 --cadence 30 --dedupe-day
 ```
 
 Alert exports include `next_due_date`, `days_past_due`, and engagement tempo fields (`avg_interval_days`, `contacts_per_month`).
