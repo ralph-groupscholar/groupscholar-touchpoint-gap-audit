@@ -92,11 +92,19 @@ type Report struct {
 	ChannelSummary map[string]int     `json:"last_channel_summary"`
 	StatusSummary  map[string]int     `json:"last_status_summary"`
 	DueSummary     []DueBucketSummary `json:"due_summary"`
+	RecencySummary []RecencyBucket    `json:"recency_summary"`
 	TopGaps        []ScholarSummary   `json:"top_gaps"`
 	Scholars       []ScholarSummary   `json:"scholars"`
 }
 
 type DueBucketSummary struct {
+	Label   string `json:"label"`
+	MinDays *int   `json:"min_days,omitempty"`
+	MaxDays *int   `json:"max_days,omitempty"`
+	Count   int    `json:"count"`
+}
+
+type RecencyBucket struct {
 	Label   string `json:"label"`
 	MinDays *int   `json:"min_days,omitempty"`
 	MaxDays *int   `json:"max_days,omitempty"`
@@ -122,6 +130,7 @@ func main() {
 	channelsOut := flag.String("channels-csv", "", "Optional CSV output for channel summary")
 	statusesOut := flag.String("statuses-csv", "", "Optional CSV output for last status summary")
 	dueOut := flag.String("due-csv", "", "Optional CSV output for due-date buckets")
+	recencyOut := flag.String("recency-csv", "", "Optional CSV output for recency buckets")
 	minTier := flag.String("min-tier", "overdue", "Minimum tier for alerts (due_soon, overdue, critical)")
 	dbEnabled := flag.Bool("db", false, "Store report in Postgres (requires TOUCHPOINT_GAP_AUDIT_DB_URL or DATABASE_URL)")
 	dbSchema := flag.String("db-schema", "touchpoint_gap_audit", "Postgres schema for audit tables")
@@ -194,6 +203,12 @@ func main() {
 			exitWithError(err)
 		}
 		fmt.Printf("Due summary CSV saved to %s\n", *dueOut)
+	}
+	if *recencyOut != "" {
+		if err := writeRecencyCSV(report, *recencyOut); err != nil {
+			exitWithError(err)
+		}
+		fmt.Printf("Recency summary CSV saved to %s\n", *recencyOut)
 	}
 
 	if *dbEnabled || *initDB {
@@ -461,6 +476,7 @@ func buildReport(path string, asOf time.Time, cadenceDays int, dueWindowDays int
 		ChannelSummary: channelSummary,
 		StatusSummary:  statusSummary,
 		DueSummary:     buildDueSummary(summaries, asOfDate),
+		RecencySummary: buildRecencySummary(summaries),
 		TopGaps:        topGaps,
 		Scholars:       summaries,
 	}
@@ -631,6 +647,9 @@ func printReport(report Report, inputPath string) {
 	}
 	if len(report.DueSummary) > 0 {
 		fmt.Printf("Due buckets: %s\n", formatDueSummary(report.DueSummary))
+	}
+	if len(report.RecencySummary) > 0 {
+		fmt.Printf("Recency buckets: %s\n", formatRecencySummary(report.RecencySummary))
 	}
 
 	fmt.Println("\nTop gaps")
@@ -846,11 +865,11 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 		INSERT INTO %s.audit_scholar_gaps (
 			id, run_id, scholar_id, program, last_channel, last_status,
 			last_contact, first_contact, next_due_date, contact_count, gap_days, days_past_due,
-			days_since_first_contact, avg_interval_days, contacts_per_month, tier
+			missed_cadences, days_since_first_contact, avg_interval_days, contacts_per_month, tier
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,
 			$7,$8,$9,$10,$11,$12,
-			$13,$14,$15,$16
+			$13,$14,$15,$16,$17
 		)`, schema)
 
 	for _, entry := range report.Scholars {
@@ -870,6 +889,7 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 			entry.ContactCount,
 			entry.GapDays,
 			entry.DaysPastDue,
+			entry.MissedCadences,
 			entry.DaysSinceFirst,
 			entry.AvgIntervalDays,
 			entry.ContactsPerMonth,
@@ -883,11 +903,11 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 
 	insertProgramSQL := fmt.Sprintf(`
 		INSERT INTO %s.audit_program_summary (
-			id, run_id, program, scholars, avg_gap_days, on_track_count,
-			due_soon_count, overdue_count, critical_count
+			id, run_id, program, scholars, avg_gap_days, avg_missed_cadences,
+			on_track_count, due_soon_count, overdue_count, critical_count
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,
-			$7,$8,$9
+			$7,$8,$9,$10
 		)`, schema)
 
 	for _, entry := range report.ProgramSummary {
@@ -897,6 +917,7 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 			entry.Program,
 			entry.Scholars,
 			entry.AvgGapDays,
+			entry.AvgMissedCadences,
 			entry.OnTrackCount,
 			entry.DueSoonCount,
 			entry.OverdueCount,
@@ -948,6 +969,28 @@ func storeReportTx(ctx context.Context, db *sql.DB, report Report, schema string
 		}
 	}
 
+	insertRecencySQL := fmt.Sprintf(`
+		INSERT INTO %s.audit_recency_summary (
+			id, run_id, label, min_days, max_days, bucket_count
+		) VALUES (
+			$1,$2,$3,$4,$5,$6
+		)`, schema)
+
+	for _, entry := range report.RecencySummary {
+		_, err = tx.ExecContext(ctx, insertRecencySQL,
+			uuid.New(),
+			runID,
+			entry.Label,
+			nullInt(entry.MinDays),
+			nullInt(entry.MaxDays),
+			entry.Count,
+		)
+		if err != nil {
+			_ = tx.Rollback()
+			return "", err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
@@ -969,6 +1012,8 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 			avg_gap_days numeric(8,2) NOT NULL,
 			median_gap_days numeric(8,2) NOT NULL,
 			max_gap_days integer NOT NULL,
+			avg_missed_cadences numeric(8,2) NOT NULL DEFAULT 0,
+			max_missed_cadences integer NOT NULL DEFAULT 0,
 			on_track_count integer NOT NULL,
 			due_soon_count integer NOT NULL,
 			overdue_count integer NOT NULL,
@@ -985,6 +1030,20 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 	_, err = db.ExecContext(ctx, fmt.Sprintf(`
 		ALTER TABLE %s.audit_runs
 		ADD COLUMN IF NOT EXISTS future_rows integer NOT NULL DEFAULT 0
+	`, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		ALTER TABLE %s.audit_runs
+		ADD COLUMN IF NOT EXISTS avg_missed_cadences numeric(8,2) NOT NULL DEFAULT 0
+	`, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		ALTER TABLE %s.audit_runs
+		ADD COLUMN IF NOT EXISTS max_missed_cadences integer NOT NULL DEFAULT 0
 	`, schema))
 	if err != nil {
 		return err
@@ -1098,6 +1157,20 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 		return err
 	}
 
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s.audit_recency_summary (
+			id uuid PRIMARY KEY,
+			run_id uuid NOT NULL REFERENCES %s.audit_runs(id) ON DELETE CASCADE,
+			label text NOT NULL,
+			min_days integer,
+			max_days integer,
+			bucket_count integer NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`, schema, schema))
+	if err != nil {
+		return err
+	}
+
 	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_scholar_gaps_run_idx ON %s.audit_scholar_gaps (run_id)`, schema, schema))
 	if err != nil {
 		return err
@@ -1115,6 +1188,10 @@ func ensureSchema(ctx context.Context, db *sql.DB, schema string) error {
 		return err
 	}
 	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_status_summary_run_idx ON %s.audit_status_summary (run_id)`, schema, schema))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_audit_recency_summary_run_idx ON %s.audit_recency_summary (run_id)`, schema, schema))
 	return err
 }
 
@@ -1130,6 +1207,13 @@ func nullDate(value time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: dateOnly(value), Valid: true}
+}
+
+func nullInt(value *int) sql.NullInt64 {
+	if value == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(*value), Valid: true}
 }
 
 func writeAlertsCSV(report Report, path string, minTier string) error {
@@ -1335,6 +1419,38 @@ func writeDueCSV(report Report, path string) error {
 	return writer.Error()
 }
 
+func writeRecencyCSV(report Report, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	if err := writer.Write([]string{
+		"label",
+		"min_days",
+		"max_days",
+		"count",
+	}); err != nil {
+		return err
+	}
+
+	for _, entry := range report.RecencySummary {
+		record := []string{
+			entry.Label,
+			formatOptionalInt(entry.MinDays),
+			formatOptionalInt(entry.MaxDays),
+			fmt.Sprintf("%d", entry.Count),
+		}
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
+}
+
 func parseDate(value string) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1444,7 +1560,36 @@ func buildDueSummary(entries []ScholarSummary, asOf time.Time) []DueBucketSummar
 	return result
 }
 
+func buildRecencySummary(entries []ScholarSummary) []RecencyBucket {
+	defs := recencyBucketDefinitions()
+	result := make([]RecencyBucket, len(defs))
+	for idx, def := range defs {
+		result[idx] = RecencyBucket{
+			Label:   def.Label,
+			MinDays: def.MinDays,
+			MaxDays: def.MaxDays,
+		}
+	}
+	index := map[string]int{}
+	for idx, def := range defs {
+		index[def.Label] = idx
+	}
+	for _, entry := range entries {
+		label := bucketRecencyLabel(entry)
+		if pos, ok := index[label]; ok {
+			result[pos].Count++
+		}
+	}
+	return result
+}
+
 type dueBucketDefinition struct {
+	Label   string
+	MinDays *int
+	MaxDays *int
+}
+
+type recencyBucketDefinition struct {
 	Label   string
 	MinDays *int
 	MaxDays *int
@@ -1458,6 +1603,18 @@ func dueBucketDefinitions() []dueBucketDefinition {
 		{Label: "due_15_30", MinDays: intPtr(15), MaxDays: intPtr(30)},
 		{Label: "due_31_60", MinDays: intPtr(31), MaxDays: intPtr(60)},
 		{Label: "due_61_plus", MinDays: intPtr(61)},
+		{Label: "unknown", MinDays: nil, MaxDays: nil},
+	}
+}
+
+func recencyBucketDefinitions() []recencyBucketDefinition {
+	return []recencyBucketDefinition{
+		{Label: "0_7", MinDays: intPtr(0), MaxDays: intPtr(7)},
+		{Label: "8_30", MinDays: intPtr(8), MaxDays: intPtr(30)},
+		{Label: "31_60", MinDays: intPtr(31), MaxDays: intPtr(60)},
+		{Label: "61_90", MinDays: intPtr(61), MaxDays: intPtr(90)},
+		{Label: "91_180", MinDays: intPtr(91), MaxDays: intPtr(180)},
+		{Label: "181_plus", MinDays: intPtr(181)},
 		{Label: "unknown", MinDays: nil, MaxDays: nil},
 	}
 }
@@ -1485,7 +1642,42 @@ func bucketDueLabel(nextDue time.Time, asOf time.Time) string {
 	}
 }
 
+func bucketRecencyLabel(entry ScholarSummary) string {
+	if entry.LastContact.IsZero() {
+		return "unknown"
+	}
+	gap := entry.GapDays
+	switch {
+	case gap <= 7:
+		return "0_7"
+	case gap <= 30:
+		return "8_30"
+	case gap <= 60:
+		return "31_60"
+	case gap <= 90:
+		return "61_90"
+	case gap <= 180:
+		return "91_180"
+	default:
+		return "181_plus"
+	}
+}
+
 func formatDueSummary(entries []DueBucketSummary) string {
+	parts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Count == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", entry.Label, entry.Count))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " | ")
+}
+
+func formatRecencySummary(entries []RecencyBucket) string {
 	parts := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.Count == 0 {
